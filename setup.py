@@ -12,6 +12,8 @@ region = "us-west1"
 ssh_key = "user_name:ssh-rsa string" # Required. Example: service_account:ssh-rsa SDqhy5jXUv3xKGhzYJzjALiHg6ZzWKSSrhbjXVAvp6SecWdZPkGw16UhHHTCHvD4bwjnH6NXjHtyuCVqhdDuY1+E1BSdf0G0rncN8qFrzT1imJqraru38UEJRTZFrXMG6Kvx698J[ELvapEXXMv52zW6ZwHuU5aJ0t2atDHEXha7V3UAKSbgxLbbtQGRgtANcz3fvk9ve8GVPEtB3Cyz3eyg4aBHVqLyxx3N9hithMe
 ssh_private_key_path = "/Users/danielraffel/.ssh/gcp" # Required. Update to your private key path
 ssh_user = "daniel_raffel" # Required. Update to your SSH key user_name
+enable_swap = True # Optional. Enable swap file creation (recommended for e2-micro instances with 1GB RAM). Set to False to disable.
+swap_size = "2G" # Optional. Swap file size (default: 2G). Only used if enable_swap is True.
 
 def main():
     # Change the working directory to the script's directory
@@ -183,7 +185,7 @@ output "instance_ip" {{
 def create_file(file_name, content):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(script_dir, file_name)
-    with open(file_path, "w") as file:
+    with open(file_path, "w", newline='\n') as file:
         file.write(content)
 
 def parse_arguments():
@@ -192,7 +194,25 @@ def parse_arguments():
     return parser.parse_args()
 
 # Define content for each file
-setup_server_content = """#!/bin/bash
+def generate_setup_server_content():
+    """Generate setup_server.sh content with optional swap file creation"""
+    swap_section = ""
+    if enable_swap:
+        swap_section = f"""
+# Create and enable swap file (recommended for e2-micro instances with 1GB RAM)
+echo "Creating {swap_size} swap file..."
+sudo fallocate -l {swap_size} /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+# Make swap file persistent across reboots
+sudo cp /etc/fstab /etc/fstab.bak
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+echo "Swap file created and enabled successfully."
+"""
+
+    return f"""#!/bin/bash
 # Add Docker's official GPG key
 sudo apt-get update
 sudo apt-get install ca-certificates curl gnupg
@@ -201,8 +221,8 @@ curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o 
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
 # Add the repository to Apt sources
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \\
+  $(. /etc/os-release && echo \\"$VERSION_CODENAME\\") stable" | \\
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 # Update apt repositories
@@ -210,7 +230,7 @@ sudo apt-get update
 
 # Install Docker
 sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
+{swap_section}
 # Start and enable Docker service
 systemctl start docker
 systemctl enable docker
@@ -236,9 +256,14 @@ sudo mkdir -p /home/{ssh_user}/n8n-local-files
 # Create Data Folders and Docker Volumes
 sudo docker volume create n8n_data
 sudo mkdir -p /home/{ssh_user}/n8n-local-files
-""".format(fastapi_docker_image=fastapi_docker_image, ssh_user=ssh_user)
+"""
 
-setup_cloudflare_content = """#!/bin/bash
+setup_server_content = generate_setup_server_content()
+
+def generate_setup_cloudflare_content(static_ip_value):
+    """Generate setup_cloudflare.sh content with proper static IP replacement"""
+    formatted_hostname = format_hostname(n8n_hostname)
+    return f"""#!/bin/bash
 # Add cloudflare gpg key
 sudo mkdir -p --mode=0755 /usr/share/keyrings
 curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
@@ -248,9 +273,9 @@ echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudf
 sudo apt-get update && sudo apt-get install cloudflared
 sudo cloudflared tunnel login
 sudo cloudflared tunnel create {formatted_hostname}
-sudo cloudflared tunnel route ip add {static_ip}/32 {formatted_hostname}
+sudo cloudflared tunnel route ip add {static_ip_value}/32 {formatted_hostname}
 sudo cloudflared tunnel route dns {formatted_hostname} {n8n_hostname}
-tunnel_id=$(sudo cloudflared tunnel info {formatted_hostname} | grep -oP 'Your tunnel \K([a-z0-9-]+)')
+tunnel_id=$(sudo cloudflared tunnel info {formatted_hostname} | grep -oP 'Your tunnel \\K([a-z0-9-]+)')
 mkdir /etc/cloudflared
 echo "tunnel: {formatted_hostname}" > /etc/cloudflared/config.yml
 echo "credentials-file: /root/.cloudflared/$tunnel_id.json" >> /etc/cloudflared/config.yml
@@ -265,7 +290,7 @@ echo "  - service: http_status:404" >> /etc/cloudflared/config.yml
 cloudflared service install
 systemctl start cloudflared
 systemctl status cloudflared
-""".format(formatted_hostname=format_hostname(n8n_hostname), static_ip="<STATIC_IP>", n8n_hostname=n8n_hostname)
+"""
 
 docker_compose_content = """version: '3'
 services:
@@ -343,17 +368,17 @@ USER root
 # Install socket.io-client globally
 RUN npm install -g socket.io-client
 
+# Copy the custom entrypoint script to the container
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+
+# Set proper ownership and make the entrypoint script executable
+RUN chown root:root /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
+
 # Switch back to the node user
 USER node
 
 # Set working directory to avoid potential errors
 WORKDIR /data
-
-# Copy the custom entrypoint script to the container
-COPY docker-entrypoint.sh /docker-entrypoint.sh
-
-# Make the entrypoint script executable
-RUN chmod +x /docker-entrypoint.sh
 
 # Use the custom entrypoint script
 ENTRYPOINT ["/docker-entrypoint.sh"]
@@ -378,14 +403,17 @@ def main():
 
     if args.no_upload:
         # Generate client-side template files only
+        # Use placeholder for static IP in no-upload mode
+        placeholder_ip = "<YOUR_STATIC_IP_HERE>"
         create_file("setup_server.sh", setup_server_content)
-        create_file("setup_cloudflare.sh", setup_cloudflare_content)
+        create_file("setup_cloudflare.sh", generate_setup_cloudflare_content(placeholder_ip))
         create_file("docker-compose.yml", docker_compose_content)
         create_file("docker-compose.service", docker_compose_service_content)
         create_file("updater.sh", updater_content)
         create_file("Dockerfile", dockerfile_content)
         create_file("docker-entrypoint.sh", docker_entrypoint_content)
         print("Client-side template files generated successfully.")
+        print(f"NOTE: Replace '{placeholder_ip}' in setup_cloudflare.sh with your actual static IP before use.")
     else:
         # Perform full setup including GCP operations
         project_id = fetch_project_id()
@@ -397,7 +425,7 @@ def main():
             sys.exit(1)
 
         create_file("setup_server.sh", setup_server_content)
-        create_file("setup_cloudflare.sh", setup_cloudflare_content.format(static_ip=static_ip))
+        create_file("setup_cloudflare.sh", generate_setup_cloudflare_content(static_ip))
         create_file("docker-compose.yml", docker_compose_content)
         create_file("docker-compose.service", docker_compose_service_content)
         create_file("updater.sh", updater_content)

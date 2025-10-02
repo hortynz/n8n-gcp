@@ -47,7 +47,8 @@ The Terraform configuration (`setup.tf`) provisions the following on GCP:
        - NODE_FUNCTION_ALLOW_EXTERNAL=another-package
      ```
 4. **setup_server.sh**:
-   - The `setup_server.sh` script is executed on the server to install Docker, build the custom n8n image, and start the Docker containers using Docker Compose. It ensures that Docker is correctly installed and configured on your GCP instance and builds the custom n8n image using the Dockerfile. This script is essential for initializing the server with all the necessary components.
+   - The `setup_server.sh` script is executed on the server to install Docker, optionally create a swap file, build the custom n8n image, and start the Docker containers using Docker Compose. It ensures that Docker is correctly installed and configured on your GCP instance and builds the custom n8n image using the Dockerfile. This script is essential for initializing the server with all the necessary components.
+   - **Swap File**: By default, the script creates a 2GB swap file to prevent out-of-memory issues on e2-micro instances (which only have 1GB RAM). n8n can be memory-intensive, especially with certain nodes, and the swap file ensures stable operation. You can disable this by setting `enable_swap = False` or adjust the size with `swap_size` in the Python script.
 5. **setup_cloudflare.sh**:
    - The `setup_cloudflare.sh` script sets up a Cloudflare tunnel to provide SSL encryption for your n8n instance. It downloads and installs the Cloudflare daemon (`cloudflared`), configures a tunnel, and associates it with your chosen subdomain. This script ensures that your n8n instance is securely accessible over HTTPS.
 6. **updater.sh**:
@@ -76,6 +77,8 @@ It will take around 20 minutes to configure the server. Most of the time takes p
 - `ssh_key`: Required. Add your SSH key.
 - `ssh_private_key_path`: Required. Path to local private key `/Users/username/.ssh/gcp`.
 - `ssh_user`: Required. SSH key username.
+- `enable_swap`: Optional. Default is `True`. Creates a swap file to prevent out-of-memory issues on e2-micro instances (1GB RAM). Set to `False` to disable.
+- `swap_size`: Optional. Default is `"2G"`. Size of the swap file when `enable_swap` is `True`. Can be adjusted (e.g., `"1G"`, `"4G"`).
 
 ### Step 2: Deployment Steps:
 1. Clone the GitHub repository
@@ -161,6 +164,13 @@ To verify that the `n8n-nodes-socket.io` package is installed and working correc
 ```
 
 ## Debugging and FAQs
+- **Memory and Swap File**:
+  - **Why is swap enabled by default?** E2-micro instances have only 1GB of RAM, which isn't sufficient for n8n during intensive operations. Some nodes can be memory-intensive, and workflows may fail without additional memory. A 2GB swap file prevents out-of-memory crashes and ensures stable operation.
+  - **Check swap status**: `sudo swapon --show` or `free -h`
+  - **Disable swap temporarily**: `sudo swapoff /swapfile`
+  - **Re-enable swap**: `sudo swapon /swapfile`
+  - **Remove swap permanently**: Edit `/etc/fstab` to remove the swap line, then run `sudo swapoff /swapfile` and `sudo rm /swapfile`
+  - **Adjust swap size**: Modify the `swap_size` variable in [setup.py](setup.py) before running the script (e.g., `swap_size = "1G"` or `swap_size = "4G"`)
 - **If You Experience Service Account Key Issues You Can List/Delete**:
   - List Keys: `gcloud iam service-accounts keys list --iam-account <YOURACCOUNTSTRING-compute@developer.gserviceaccount.com>`
   - Delete Keys: `gcloud iam service-accounts keys delete <key-id> --iam-account <YOURACCOUNTSTRING-compute@developer.gserviceaccount.com>`
